@@ -181,6 +181,24 @@ cmd_prog(int nargs, char **args)
 }
 
 /*
+ * Command for enabling debugging thread messages.
+ */
+static
+int
+cmd_db_thread(int nargs, char **args)
+{
+	(void)args;
+	if (nargs != 1) {
+		kprintf("Usage: dth\n");
+		return EINVAL;
+	}
+
+	dbflags = DB_THREADS;
+
+	return 0;
+}
+
+/*
  * Command for starting the system shell.
  */
 static
@@ -426,6 +444,7 @@ showmenu(const char *name, const char *x[])
 }
 
 static const char *opsmenu[] = {
+	"[dth]     Enable thread debug messages",
 	"[s]       Shell                     ",
 	"[p]       Other program             ",
 	"[mount]   Mount a filesystem        ",
@@ -536,6 +555,7 @@ static struct {
 	{ "?t",		cmd_testmenu },
 
 	/* operations */
+	{ "dth",    cmd_db_thread },
 	{ "s",		cmd_shell },
 	{ "p",		cmd_prog },
 	{ "mount",	cmd_mount },
