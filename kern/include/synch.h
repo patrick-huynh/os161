@@ -74,6 +74,11 @@ void V(struct semaphore *);
  */
 struct lock {
         char *lk_name;
+	struct wchan *lk_wchan; // queue where threads wait
+	struct spinlock lk_lock; // to synch access to this struct
+        struct thread *owner; // the thread that owns this lock
+        volatile bool lk_is_free; // if the lock is free
+
         // add what you need here
         // (don't forget to mark things volatile as needed)
 };
@@ -113,6 +118,7 @@ void lock_destroy(struct lock *);
 
 struct cv {
         char *cv_name;
+        struct wchan *cv_wchan; // queue where threads wait
         // add what you need here
         // (don't forget to mark things volatile as needed)
 };
