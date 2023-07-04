@@ -49,7 +49,8 @@
 #include <vnode.h>
 #include <vfs.h>
 #include <synch.h>
-#include <kern/fcntl.h>  
+#include <kern/fcntl.h>
+#include "opt-A2.h"
 
 /*
  * The process for the kernel; this holds all the kernel-only threads.
@@ -70,6 +71,11 @@ struct semaphore *no_proc_sem;
 #endif  // UW
 
 
+#if OPT_A2
+	static volatile pid_t pid_ctr; // global pid counter
+	static struct lock *pid_ctr_lock;
+	static bool is_kernel_init; // to tell if kernel is already initialized
+#endif		
 
 /*
  * Create a proc structure.
@@ -78,6 +84,11 @@ static
 struct proc *
 proc_create(const char *name)
 {
+
+#if OPT_A2
+	KASSERT(pid_ctr > 0);
+#endif
+
 	struct proc *proc;
 
 	proc = kmalloc(sizeof(*proc));
@@ -103,6 +114,24 @@ proc_create(const char *name)
 	proc->console = NULL;
 #endif // UW
 
+#if OPT_A2
+	if (!is_kernel_init) {
+		proc->pid = pid_ctr;
+		pid_ctr++;	
+	} else {
+		lock_acquire(pid_ctr_lock);
+		proc->pid = pid_ctr;
+		pid_ctr++;
+		lock_release(pid_ctr_lock);
+	}
+	proc->parent = NULL;
+	proc->children = array_create(); // init children array
+	proc->children_lk = lock_create(proc->p_name); // init children lock
+	if (proc->children_lk == NULL) panic("could not create child lock");
+	proc->is_exited = cv_create("is_exited");
+	if (proc->is_exited == NULL) panic("could not create cv is_exited");
+#endif
+
 	return proc;
 }
 
@@ -123,6 +152,21 @@ proc_destroy(struct proc *proc)
 
 	KASSERT(proc != NULL);
 	KASSERT(proc != kproc);
+
+#if OPT_A2
+	// free each alloc. child_info
+	lock_acquire(proc->children_lk);
+	for (int i = array_num(proc->children) - 1; i >= 0; --i) {
+		struct child_info *ci = array_get(proc->children, i);
+		ci->proc->parent = NULL;
+		kfree(ci);
+		array_remove(proc->children, i);
+	}
+	array_destroy(proc->children); // clean up ext alloc. children arr.
+	lock_release(proc->children_lk);
+	cv_destroy(proc->is_exited);
+	lock_destroy(proc->children_lk); // destory the child lock
+#endif
 
 	/*
 	 * We don't take p_lock in here because we must have the only
@@ -193,10 +237,20 @@ proc_destroy(struct proc *proc)
 void
 proc_bootstrap(void)
 {
-  kproc = proc_create("[kernel]");
-  if (kproc == NULL) {
-    panic("proc_create for kproc failed\n");
-  }
+#if OPT_A2
+    is_kernel_init = false;
+    pid_ctr = 1; // initialize a global counter for pid
+    pid_ctr_lock = lock_create("pid_ctr_lock");
+    if (pid_ctr_lock == NULL) panic("could not create pid_ctr_lock\n");
+#endif
+    kproc = proc_create("[kernel]");
+    if (kproc == NULL) {
+        panic("proc_create for kproc failed\n");
+    }
+#if OPT_A2
+	is_kernel_init = true;
+#endif
+
 #ifdef UW
   proc_count = 0;
   proc_count_mutex = sem_create("proc_count_mutex",1);
