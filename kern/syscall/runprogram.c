@@ -45,12 +45,100 @@
 #include <syscall.h>
 #include <test.h>
 
+#include "opt-A2.h"
+#if OPT_A2
+#include <copyinout.h>	
+#endif
+
 /*
  * Load program "progname" and start running it in usermode.
  * Does not return except on error.
  *
  * Calls vfs_open on progname and thus may destroy it.
  */
+#if OPT_A2
+int
+runprogram(char *progname, int argc, char **args)
+{
+	struct addrspace *as;
+	struct vnode *v;
+	vaddr_t entrypoint, stackptr;
+	int result;
+
+	/* Open the file. */
+	result = vfs_open(progname, O_RDONLY, 0, &v);
+	if (result) {
+		return result;
+	}
+
+	/* We should be a new process. */
+	KASSERT(curproc_getas() == NULL);
+
+	/* Create a new address space. */
+	as = as_create();
+	if (as ==NULL) {
+		vfs_close(v);
+		return ENOMEM;
+	}
+
+	/* Switch to it and activate it. */
+	struct addrspace *old_as = curproc_setas(as);
+	as_activate();
+
+	/* Load the executable. */
+	result = load_elf(v, &entrypoint);
+	if (result) {
+		/* p_addrspace will go away when curproc is destroyed */
+		vfs_close(v);
+		return result;
+	}
+
+	/* Done with the file now. */
+	vfs_close(v);
+
+	/* Define the user stack in the address space */
+	result = as_define_stack(as, &stackptr);
+	if (result) {
+		/* p_addrspace will go away when curproc is destroyed */
+		return result;
+	}
+
+	/* Pushing args to the stack */
+	vaddr_t curstack = stackptr;
+	vaddr_t *argv = kmalloc(sizeof(vaddr_t) * (argc + 1));
+	KASSERT(argv != NULL);
+	
+	argv[argc] = (vaddr_t)NULL; // set argv[argc] NULL 
+	for (int i = argc - 1; i >= 0; --i) {
+		size_t args_size = strlen(args[i]) + 1;
+		args_size = ROUNDUP(args_size, 4) * sizeof(char);
+		curstack -= args_size;
+		argv[i] = curstack;
+		int err = copyout(args[i], (userptr_t)curstack, args_size);
+		KASSERT(err == 0);
+	}
+
+	for (int i = argc; i >= 0; --i) {
+		size_t args_size = sizeof(vaddr_t);
+		curstack -= args_size;
+		int err = copyout(argv + i, (userptr_t)curstack, args_size);
+		KASSERT(err == 0);  
+	}
+
+
+	/* Cleaning up */
+	as_destroy(old_as);
+	kfree(argv);
+
+	/* Warp to user mode. */
+	enter_new_process(argc /*argc*/, (userptr_t)curstack /*userspace addr of argv*/,
+			  ROUNDUP(curstack, 8), entrypoint);
+	
+	/* enter_new_process does not return. */
+	panic("enter_new_process returned\n");
+	return EINVAL;
+}
+#else
 int
 runprogram(char *progname)
 {
@@ -105,4 +193,5 @@ runprogram(char *progname)
 	panic("enter_new_process returned\n");
 	return EINVAL;
 }
+#endif
 

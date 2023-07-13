@@ -13,6 +13,8 @@
 
 #if OPT_A2
 #include <mips/trapframe.h>
+#include <kern/fcntl.h>
+#include <vfs.h>
 #endif
 #include "opt-A2.h"
 
@@ -185,6 +187,111 @@ int sys_fork(struct trapframe *tf, pid_t *retval) {
   *retval = c->pid; // retur pid for parent process
 
   return 0; // return 0 for child process
+}
+
+/* execv stub handler */
+int sys_execv(const_userptr_t progname, userptr_t *args) {
+  struct addrspace *as;
+  struct vnode *v;
+  vaddr_t entrypoint, stackptr;
+  int result;
+  
+  /* Count the number of args and copy them to the kernel*/
+  int argc  = 0;
+  for (int i = 0; args[i] != NULL; ++i) {
+    argc++;
+  }
+
+  char **kargs = kmalloc(argc * sizeof(char *));
+  KASSERT(kargs != NULL);
+  for (int i = 0; i < argc; ++i) {
+    size_t arg_size = (strlen(((char **)args)[i]) + 1) * sizeof(char);
+    kargs[i] = kmalloc(arg_size);
+    KASSERT(kargs[i] != NULL);
+    int err = copyinstr(args[i], kargs[i], arg_size, NULL);
+    KASSERT(err == 0);
+  }
+
+  /* Copy the program path from user space into the kernel */
+  size_t progname_size = (strlen((char*)progname) + 1) * sizeof(char);
+  char *kprogname = kmalloc(progname_size);
+  KASSERT(kprogname != NULL);
+  int err = copyinstr(progname, kprogname, progname_size, NULL);
+  KASSERT(err == 0);
+  
+  /* Open the file. */
+  result = vfs_open((char *)kprogname, O_RDONLY, 0, &v);
+  if (result) {
+    return result;
+  }
+
+  /* Create a new address space. */
+  as = as_create();
+  if (as == NULL) {
+    vfs_close(v);
+    return ENOMEM;
+  }
+  
+  /* Switch to it and activate it. */
+  struct addrspace * old_as = curproc_setas(as);
+  as_activate();
+
+  /* Load the executable. */
+  result = load_elf(v, &entrypoint);
+
+  if (result) {
+    /* p_addrspace will go away when curproc is destroyed */
+    vfs_close(v);
+    return result;
+  }
+
+  /* Done with the file now. */
+  vfs_close(v);
+
+  /* Define the user stack in the address space */
+	result = as_define_stack(as, &stackptr);
+	if (result) {
+		/* p_addrspace will go away when curproc is destroyed */
+		return result;
+	}
+
+  /* Pushing args to the stack */
+  vaddr_t curstack = stackptr;
+  vaddr_t *argv = kmalloc(sizeof(vaddr_t) * (argc + 1));
+  KASSERT(argv != NULL);
+  
+  argv[argc] = (vaddr_t)NULL; // set argv[argc] NULL 
+  for (int i = argc - 1; i >= 0; --i) {
+    size_t args_size = strlen(kargs[i]) + 1;
+    args_size = ROUNDUP(args_size, 4) * sizeof(char);
+    curstack -= args_size;
+    argv[i] = curstack;
+    int err = copyout(kargs[i], (userptr_t)curstack, args_size);
+    KASSERT(err == 0);
+  }
+
+  for (int i = argc; i >= 0; --i) {
+    size_t args_size = sizeof(vaddr_t);
+    curstack -= args_size;
+    int err = copyout(argv + i, (userptr_t)curstack, args_size);
+    KASSERT(err == 0);  
+  }
+
+  /* Delete old address space */
+  as_destroy(old_as);
+  kfree(kprogname);
+  for (int i = 0; i < argc; ++i) {
+    kfree(kargs[i]);
+  }
+  kfree(kargs);
+  kfree(argv);
+
+  /* Warp to user mode */
+  enter_new_process(argc, (userptr_t)curstack, ROUNDUP(curstack, 8), entrypoint);
+  panic("enter_new_process returned when it shouldn't have\n");
+  
+  /* execv only returns if there is an err */
+  return -1; // 
 }
 #endif
 
